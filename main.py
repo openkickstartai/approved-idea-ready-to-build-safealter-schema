@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""SafeAlter CLI — catch backward-incompatible schema changes before deploy."""
+"""SafeAlter CLI \u2014 catch backward-incompatible schema changes before deploy."""
 import argparse
-import json
 import sys
 from pathlib import Path
-from safealter import parse_migrations, find_violations, to_sarif, to_json
+from safealter import parse_migrations, find_violations, format_results
 
 CODE_EXTS = {".py", ".sql", ".go", ".java", ".ts", ".js", ".rb", ".kt", ".rs"}
 
@@ -31,6 +30,8 @@ def main(argv=None):
         help="Application code files or directories to scan")
     ap.add_argument("-f", "--format", choices=["text", "json", "sarif"], default="text",
         help="Output format (default: text)")
+    ap.add_argument("-o", "--output", default=None,
+        help="Write output to file instead of stdout")
     ap.add_argument("--fail-on-warning", action="store_true",
         help="Exit 1 on warnings too, not just errors")
     args = ap.parse_args(argv)
@@ -44,29 +45,20 @@ def main(argv=None):
 
     violations = find_violations(changes, codes)
 
-    if args.format == "json":
-        print(to_json(violations))
-    elif args.format == "sarif":
-        print(json.dumps(to_sarif(violations), indent=2))
-    else:
-        for v in violations:
-            icon = "\u274c" if v.severity == "error" else "\u26a0\ufe0f"
-            print(f"{icon} [{v.kind}] {v.table}.{v.column or '*'}")
-            print(f"   migration: {v.migration_file}:{v.migration_line}")
-            print(f"   code ref:  {v.code_file}:{v.code_line} \u2192 {v.snippet}")
-        if not violations:
-            print("\u2705 No backward-incompatible references found.")
+    output = format_results(violations, args.format)
 
-    errs = sum(1 for v in violations if v.severity == "error")
-    warns = len(violations) - errs
-    if errs:
-        print(f"\n\U0001f4a5 {errs} error(s), {warns} warning(s)", file=sys.stderr)
-        return 1
-    if warns and args.fail_on_warning:
-        print(f"\n\u26a0\ufe0f {warns} warning(s) (--fail-on-warning)", file=sys.stderr)
-        return 1
-    return 0
+    if args.output:
+        Path(args.output).write_text(output + "\n")
+    else:
+        print(output)
+
+    has_errors = any(v.severity == "error" for v in violations)
+    has_warnings = any(v.severity == "warning" for v in violations)
+
+    if has_errors or (args.fail_on_warning and has_warnings):
+        sys.exit(1)
+    sys.exit(0)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

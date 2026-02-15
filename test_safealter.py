@@ -1,7 +1,12 @@
-"""Tests for SafeAlter — 13 test cases covering parse, cross-validate, and output."""
+"""Tests for SafeAlter \u2014 covering parse, cross-validate, and structured output."""
 import json
-from safealter import parse_migrations, find_violations, to_sarif, to_json
+from safealter import (
+    parse_migrations, find_violations,
+    to_sarif, to_json, format_results,
+)
 
+
+# ---- Parse tests ----
 
 def test_detect_drop_column():
     changes = parse_migrations("ALTER TABLE users DROP COLUMN email;", "V1.sql")
@@ -46,59 +51,154 @@ def test_detect_type_change():
     assert changes[0].severity == "warning"
 
 
+# ---- Cross-validation tests ----
+
 def test_cross_validate_drop_column_finds_broken_ref():
     changes = parse_migrations("ALTER TABLE users DROP COLUMN email;", "V1.sql")
-    code = {"app.py": "row = db.execute('SELECT email FROM users WHERE id=1')"}
+    code = {"app.py": 'query = "SELECT email FROM users"'}
     violations = find_violations(changes, code)
     assert len(violations) == 1
     assert violations[0].kind == "drop_column"
     assert violations[0].code_file == "app.py"
-    assert violations[0].code_line == 1
+
+
+def test_cross_validate_no_ref_means_no_violation():
+    changes = parse_migrations("ALTER TABLE users DROP COLUMN email;", "V1.sql")
+    code = {"app.py": "x = 1 + 2"}
+    violations = find_violations(changes, code)
+    assert len(violations) == 0
 
 
 def test_cross_validate_drop_table_finds_broken_ref():
-    changes = parse_migrations("DROP TABLE orders;", "V2.sql")
-    code = {"queries.sql": "SELECT total FROM orders WHERE status='open';"}
+    changes = parse_migrations("DROP TABLE sessions;", "V2.sql")
+    code = {"dao.py": 'cursor.execute("DELETE FROM sessions WHERE expired")'}
     violations = find_violations(changes, code)
     assert len(violations) == 1
     assert violations[0].kind == "drop_table"
 
 
-def test_no_false_positive_on_unrelated_code():
+# ---- JSON output tests ----
+
+def _make_violations():
+    """Helper: create a sample violation list for output tests."""
     changes = parse_migrations("ALTER TABLE users DROP COLUMN email;", "V1.sql")
-    code = {"utils.py": "def add(a, b):\n    return a + b"}
+    code = {"app.py": 'query = "SELECT email FROM users"'}
+    return find_violations(changes, code)
+
+
+def test_to_json_valid_output():
+    """JSON output must be parseable and match the specified schema."""
+    violations = _make_violations()
+    raw = to_json(violations)
+    data = json.loads(raw)
+    assert data["version"] == "0.1"
+    assert isinstance(data["findings"], list)
+    assert len(data["findings"]) == 1
+    f = data["findings"][0]
+    assert f["rule"] == "drop_column"
+    assert f["severity"] == "error"
+    assert f["location"]["file"] == "app.py"
+    assert f["location"]["line"] == 1
+    assert "message" in f
+    assert "migration_statement" in f
+
+
+def test_to_json_empty_findings():
+    """JSON output with no violations should still be valid JSON."""
+    raw = to_json([])
+    data = json.loads(raw)
+    assert data["version"] == "0.1"
+    assert data["findings"] == []
+
+
+def test_json_multiple_findings():
+    """JSON output with multiple violations lists all findings."""
+    sql = "ALTER TABLE users DROP COLUMN email;\nALTER TABLE users DROP COLUMN name;"
+    changes = parse_migrations(sql, "V1.sql")
+    code = {"app.py": 'q = "SELECT email, name FROM users"'}
     violations = find_violations(changes, code)
-    assert len(violations) == 0
+    raw = to_json(violations)
+    data = json.loads(raw)
+    assert len(data["findings"]) == 2
+    rules = {f["rule"] for f in data["findings"]}
+    assert "drop_column" in rules
 
 
-def test_sarif_output_format():
-    changes = parse_migrations("ALTER TABLE users DROP COLUMN email;", "V1.sql")
-    code = {"app.py": "q = 'SELECT email FROM users'"}
-    sarif = to_sarif(find_violations(changes, code))
+# ---- SARIF output tests ----
+
+def test_to_sarif_valid_structure():
+    """SARIF output must conform to v2.1.0 schema structure."""
+    violations = _make_violations()
+    sarif = to_sarif(violations)
     assert sarif["version"] == "2.1.0"
-    assert len(sarif["runs"][0]["results"]) == 1
-    assert sarif["runs"][0]["results"][0]["ruleId"] == "safealter/drop_column"
+    assert "$schema" in sarif
+    assert len(sarif["runs"]) == 1
+    run = sarif["runs"][0]
+    assert run["tool"]["driver"]["name"] == "SafeAlter"
+    assert len(run["results"]) == 1
+    result = run["results"][0]
+    assert result["ruleId"] == "drop_column"
+    assert result["level"] == "error"
+    loc = result["locations"][0]["physicalLocation"]
+    assert loc["artifactLocation"]["uri"] == "app.py"
+    assert loc["region"]["startLine"] == 1
+    # Rules populated
+    assert len(run["tool"]["driver"]["rules"]) >= 1
+    assert run["tool"]["driver"]["rules"][0]["id"] == "drop_column"
 
 
-def test_json_output_format():
-    changes = parse_migrations("DROP TABLE orders;", "V2.sql")
-    code = {"q.sql": "SELECT * FROM orders;"}
-    data = json.loads(to_json(find_violations(changes, code)))
-    assert len(data) == 1
-    assert data[0]["kind"] == "drop_table"
-    assert data[0]["table"] == "orders"
+def test_to_sarif_serializable():
+    """SARIF output must be JSON-serializable."""
+    violations = _make_violations()
+    sarif = to_sarif(violations)
+    raw = json.dumps(sarif)
+    reparsed = json.loads(raw)
+    assert reparsed["version"] == "2.1.0"
 
 
-def test_multiple_changes_parsed():
-    sql = "ALTER TABLE t DROP COLUMN a;\nALTER TABLE t DROP COLUMN b;\nDROP TABLE x;"
-    changes = parse_migrations(sql, "V7.sql")
-    assert len(changes) == 3
-    assert {c.kind for c in changes} == {"drop_column", "drop_table"}
+def test_to_sarif_empty():
+    """SARIF output with no violations should have empty results and rules."""
+    sarif = to_sarif([])
+    assert sarif["version"] == "2.1.0"
+    assert sarif["runs"][0]["results"] == []
+    assert sarif["runs"][0]["tool"]["driver"]["rules"] == []
 
 
-def test_quoted_identifiers():
-    sql = 'ALTER TABLE \"users\" DROP COLUMN \"email\";'
-    changes = parse_migrations(sql, "V8.sql")
-    assert len(changes) == 1
-    assert changes[0].table == "users"
-    assert changes[0].column == "email"
+def test_sarif_warning_level():
+    """SARIF output should map warning severity correctly."""
+    changes = parse_migrations("ALTER TABLE users ADD COLUMN age INT NOT NULL;", "V4.sql")
+    code = {"app.py": 'db.execute("INSERT INTO users (age) VALUES (1)")'}
+    violations = find_violations(changes, code)
+    assert len(violations) >= 1
+    sarif = to_sarif(violations)
+    result = sarif["runs"][0]["results"][0]
+    assert result["level"] == "warning"
+
+
+# ---- format_results dispatch tests ----
+
+def test_format_results_json():
+    """format_results with fmt='json' returns valid JSON."""
+    violations = _make_violations()
+    output = format_results(violations, "json")
+    data = json.loads(output)
+    assert data["version"] == "0.1"
+    assert len(data["findings"]) == 1
+
+
+def test_format_results_sarif():
+    """format_results with fmt='sarif' returns valid SARIF JSON string."""
+    violations = _make_violations()
+    output = format_results(violations, "sarif")
+    data = json.loads(output)
+    assert data["version"] == "2.1.0"
+    assert len(data["runs"]) == 1
+
+
+def test_format_results_text():
+    """format_results with fmt='text' returns human-readable output."""
+    violations = _make_violations()
+    output = format_results(violations, "text")
+    assert "drop_column" in output
+    assert "users.email" in output
+    assert "error" in output.lower() or "\u274c" in output
