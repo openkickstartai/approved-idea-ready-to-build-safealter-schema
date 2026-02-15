@@ -1,10 +1,15 @@
 # SafeAlter
 
+[![CI](https://img.shields.io/github/actions/workflow/status/safealter/safealter/ci.yml?label=CI)](https://github.com/safealter/safealter/actions)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 **Zero-downtime database migration cross-validator.**
 
 Statically analyzes SQL migrations against your application code to catch backward-incompatible schema changes — dropped columns, renamed tables, unsafe NOT NULL — before they crash running services during rolling deploys.
 
 **Zero dependencies.** Pure Python stdlib. Installs in 0.2s, scans in <50ms.
+
 
 ## 🚀 Quick Start
 
@@ -16,8 +21,35 @@ safealter -m migrations/ -c src/
 Output:
 ```
 ❌ [drop_column] users.email
-   migration: migrations/V005.sql:3
-   code ref:  src/api.py:42 → row = db.execute('SELECT email FROM users')
+
+### 🔗 Pre-commit Hook
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/safealter/safealter
+    rev: v0.1.0
+    hooks:
+      - id: safealter
+        args: [-c, src/]
+```
+
+### ⚡ GitHub Action
+
+```yaml
+# .github/workflows/safealter.yml
+on: [pull_request]
+jobs:
+  safealter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: safealter/safealter@v1
+        with:
+          migration_path: migrations/
+```
+
+## 🔍 What It Catches
+
 
 💥 1 error(s), 0 warning(s)
 ```
