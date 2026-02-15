@@ -1,8 +1,10 @@
 """SafeAlter — zero-downtime migration cross-validator engine."""
 import re
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Dict
+
 
 
 @dataclass
@@ -89,3 +91,57 @@ def to_json(violations: List[Violation]) -> str:
         "migration": f"{v.migration_file}:{v.migration_line}",
         "reference": f"{v.code_file}:{v.code_line}", "snippet": v.snippet,
         "severity": v.severity} for v in violations], indent=2)
+
+
+@dataclass
+class Config:
+    """SafeAlter configuration loaded from .safealter.json."""
+    rules_disabled: List[str] = field(default_factory=list)
+    severity_override: Dict[str, str] = field(default_factory=dict)
+    scan_paths: List[str] = field(default_factory=lambda: ["."])
+    exclude_patterns: List[str] = field(default_factory=list)
+    dialect: str = "postgresql"
+
+    @classmethod
+    def default(cls) -> "Config":
+        """Return a Config with all default values."""
+        return cls()
+
+    @classmethod
+    def load(cls, path: str) -> "Config":
+        """Load configuration from a .safealter.json file."""
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"Config file not found: {path}")
+        with open(p, "r") as f:
+            data = json.load(f)
+        rules = data.get("rules", {})
+        return cls(
+            rules_disabled=rules.get("disabled", []),
+            severity_override=data.get("severity_override", {}),
+            scan_paths=data.get("scan_paths", ["."]),
+            exclude_patterns=data.get("exclude_patterns", []),
+            dialect=data.get("dialect", "postgresql"),
+        )
+
+
+def filter_violations(violations: List[Violation], config: Config) -> List[Violation]:
+    """Filter violations based on config: remove disabled rules, apply severity overrides."""
+    result = []
+    for v in violations:
+        if v.kind in config.rules_disabled:
+            continue
+        if v.kind in config.severity_override:
+            v = Violation(
+                kind=v.kind,
+                table=v.table,
+                column=v.column,
+                migration_file=v.migration_file,
+                migration_line=v.migration_line,
+                code_file=v.code_file,
+                code_line=v.code_line,
+                snippet=v.snippet,
+                severity=config.severity_override[v.kind],
+            )
+        result.append(v)
+    return result
